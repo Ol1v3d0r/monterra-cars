@@ -1,1 +1,47 @@
+name: Monterra Cars Daily
 
+on:
+  schedule:
+    - cron: "0 7 * * *"  # 7am UTC = 9am Slovakia time (CEST)
+  workflow_dispatch:       # manual trigger from GitHub
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create data directory
+        run: mkdir -p data
+
+      - name: Restore seen listings cache
+        uses: actions/cache@v4
+        with:
+          path: data/seen_listings.json
+          key: monterra-seen-${{ github.run_id }}
+          restore-keys: |
+            monterra-seen-
+
+      - name: Run Monterra scraper
+        env:
+          MONTERRA_TELEGRAM_TOKEN: ${{ secrets.MONTERRA_TELEGRAM_TOKEN }}
+          MONTERRA_CHAT_ID: ${{ secrets.MONTERRA_CHAT_ID }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python monterra.py
+
+      - name: Save seen listings cache
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: data/seen_listings.json
+          key: monterra-seen-${{ github.run_id }}
