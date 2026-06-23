@@ -199,31 +199,67 @@ def scrape_autobazar_listing(url: str) -> dict | None:
         print(f"  Autobazar detail error {url}: {e}")
         return None
 
+# ── Autobazar scraper ──────────────────────────────────────────────────────────
 def scrape_autobazar(pages=4) -> list[dict]:
-    """Scrape listing URLs from Autobazar index, then fetch each detail page."""
+    """Use Autobazar's internal search API which returns JSON."""
     base = "https://www.autobazar.eu"
     urls = []
 
     for page in range(1, pages + 1):
-        index_url = f"{base}/osobne-automobily/?page={page}"
+        # Autobazar uses a Next.js API route for search results
+        api_url = (
+            f"{base}/_next/data/latest/osobne-automobily.json"
+            f"?page={page}&typ=osobne-vozidla"
+        )
         try:
-            r = requests.get(index_url, headers=HEADERS, timeout=15)
-            soup = BeautifulSoup(r.text, "html.parser")
-            # detail links follow /detail/ or /detail-nove-auto/ pattern
-            links = soup.select("a[href*='/detail']")
-            print(f"  Autobazar page {page}: {len(links)} detail links, page length {len(r.text)}")
-            for a in links:
-                href = a.get("href", "")
-                full = base + href if href.startswith("/") else href
-                if full not in urls:
-                    urls.append(full)
+            r = requests.get(api_url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                print(f"  Autobazar API page {page}: status {r.status_code}")
+                # fallback: try scraping the sitemap for detail URLs
+                break
+            data = r.json()
+            # navigate the Next.js page props to find listings
+            offers = (
+                data.get("pageProps", {})
+                    .get("dehydratedState", {})
+                    .get("queries", [{}])[0]
+                    .get("state", {})
+                    .get("data", {})
+                    .get("data", [])
+            )
+            for offer in offers:
+                slug = offer.get("slug") or offer.get("url") or ""
+                offer_id = offer.get("id") or offer.get("offerId") or ""
+                if slug:
+                    url = f"{base}/detail/{slug}/{offer_id}/" if offer_id else f"{base}{slug}"
+                    if url not in urls:
+                        urls.append(url)
+            print(f"  Autobazar API page {page}: {len(offers)} offers")
             time.sleep(1.5)
         except Exception as e:
-            print(f"  Autobazar index page {page} error: {e}")
+            print(f"  Autobazar API page {page} error: {e}")
+
+    # If API approach failed, try sitemap
+    if not urls:
+        print("  Autobazar API failed, trying sitemap...")
+        try:
+            r = requests.get(
+                f"{base}/sitemap-osobne-automobily-1.xml",
+                headers=HEADERS, timeout=15
+            )
+            soup = BeautifulSoup(r.text, "xml")
+            locs = soup.select("url loc")
+            for loc in locs[:80]:
+                url = loc.get_text(strip=True)
+                if "/detail/" in url or "/detail-nove-auto/" in url:
+                    urls.append(url)
+            print(f"  Sitemap: {len(urls)} URLs found")
+        except Exception as e:
+            print(f"  Sitemap error: {e}")
 
     print(f"  Autobazar: {len(urls)} listing URLs found")
     listings = []
-    for url in urls:
+    for url in urls[:60]:
         result = scrape_autobazar_listing(url)
         if result:
             listings.append(result)
@@ -335,7 +371,7 @@ Reply ONLY in this exact JSON, no other text:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "llama3-8b-8192",
+                "model": "llama-3.3-70b-versatile",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 200,
                 "temperature": 0.2,
