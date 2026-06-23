@@ -342,7 +342,6 @@ Reply ONLY in this exact JSON, no other text:
             timeout=15,
         )
         raw = r.json()["choices"][0]["message"]["content"].strip()
-        # strip markdown fences if present
         raw = re.sub(r"```json|```", "", raw).strip()
         result = json.loads(raw)
         listing["score"] = result.get("score", 0)
