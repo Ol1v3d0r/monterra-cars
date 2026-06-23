@@ -36,7 +36,8 @@ jobs:
         env:
           MONTERRA_TELEGRAM_TOKEN: ${{ secrets.MONTERRA_TELEGRAM_TOKEN }}
           MONTERRA_CHAT_ID: ${{ secrets.MONTERRA_CHAT_ID }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
         run: python monterra.py
 
       - name: Save seen listings cache
