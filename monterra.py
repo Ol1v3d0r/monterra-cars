@@ -211,6 +211,7 @@ def scrape_autobazar(pages=4) -> list[dict]:
             soup = BeautifulSoup(r.text, "html.parser")
             # detail links follow /detail/ or /detail-nove-auto/ pattern
             links = soup.select("a[href*='/detail']")
+            print(f"  Autobazar page {page}: {len(links)} detail links, page length {len(r.text)}")
             for a in links:
                 href = a.get("href", "")
                 full = base + href if href.startswith("/") else href
@@ -341,7 +342,12 @@ Reply ONLY in this exact JSON, no other text:
             },
             timeout=15,
         )
-        raw = r.json()["choices"][0]["message"]["content"].strip()
+        print(f"  Groq status: {r.status_code}")
+        resp_json = r.json()
+        if "choices" not in resp_json:
+            print(f"  Groq response: {resp_json}")
+            raise KeyError("choices")
+        raw = resp_json["choices"][0]["message"]["content"].strip()
         raw = re.sub(r"```json|```", "", raw).strip()
         result = json.loads(raw)
         listing["score"] = result.get("score", 0)
