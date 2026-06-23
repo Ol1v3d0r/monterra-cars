@@ -209,8 +209,8 @@ def scrape_autobazar(pages=4) -> list[dict]:
         try:
             r = requests.get(index_url, headers=HEADERS, timeout=15)
             soup = BeautifulSoup(r.text, "html.parser")
-            # detail links follow /detail/ pattern
-            links = soup.select("a[href*='/detail/']")
+            # detail links follow /detail/ or /detail-nove-auto/ pattern
+            links = soup.select("a[href*='/detail']")
             for a in links:
                 href = a.get("href", "")
                 full = base + href if href.startswith("/") else href
@@ -252,7 +252,7 @@ def cross_check(listing: dict) -> bool:
             r = requests.get(url, headers=HEADERS, timeout=12)
             soup = BeautifulSoup(r.text, "html.parser")
 
-            for card in soup.select("a[href*='/detail/']"):
+            for card in soup.select("a[href*='/detail']"):
                 card_text = normalize(card.get_text(" ", strip=True))
                 matches = 0
                 if price_raw and price_raw in re.sub(r"[^\d]", "", card_text):
