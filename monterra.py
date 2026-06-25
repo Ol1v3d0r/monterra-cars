@@ -55,6 +55,7 @@ def scrape_bazos(pages=4):
         try:
             r = requests.get(url, headers=HEADERS, timeout=15)
             soup = BeautifulSoup(r.text, "html.parser")
+            found = 0
             for a in soup.select(".inzeratynadpis a"):
                 href = a.get("href", "")
                 if href.startswith("/inzerat/"):
@@ -62,11 +63,13 @@ def scrape_bazos(pages=4):
                     if full not in seen_urls:
                         seen_urls.add(full)
                         urls.append(full)
+                        found += 1
+            print(f"  Bazos page {page}: {found} new URLs")
             time.sleep(1)
         except Exception as e:
             print(f"  Bazos index error p{page}: {e}")
 
-    print(f"  Bazos: {len(urls)} unique URLs")
+    print(f"  Bazos: {len(urls)} unique URLs total")
 
     listings = []
     for url in urls:
@@ -106,25 +109,33 @@ def scrape_bazos_detail(url):
         photos = soup.select("img.carousel-cell-image")
         image_count = len(photos)
 
-        # Seller — in the hodnotenie link
+        # Seller — name is in the href as jmeno= parameter, not the link text
         seller = ""
         seller_link = soup.select_one("a[href*='hodnotenie.php']")
         if seller_link:
-            seller = seller_link.get_text(strip=True)
+            href = seller_link.get("href", "")
+            m = re.search(r"jmeno=([^&]+)", href)
+            if m:
+                seller = requests.utils.unquote(m.group(1)).replace("+", " ").strip()
 
-        # Dealer detection — s.r.o., known dealer suffixes, or "auto" businesses
-        dealer_signals = ["s.r.o.", "s.r.o", "a.s.", " auto ", "bazár", "bazar", "motors", "cars", "group"]
+        # Dealer detection
+        dealer_signals = ["s.r.o", "a.s.", "motors", "group", "bazar", "bazár", "trade", "cars s", "auto s"]
         seller_lower = seller.lower()
         is_dealer = any(d in seller_lower for d in dealer_signals)
         seller_type = "dealer" if is_dealer else "private"
 
-        # Location
+        # Location — try multiple selectors
         location = ""
-        for sel in [".inzeratylok", ".lokace", "span.locate"]:
+        for sel in [".inzeratylok", ".lokace", "span.locate", ".inzeratymisto"]:
             el = soup.select_one(sel)
             if el:
                 location = el.get_text(strip=True)
                 break
+        # fallback: look for PSČ pattern (Slovak postal code) in page text
+        if not location:
+            m = re.search(r"(\d{3}\s?\d{2})", soup.get_text())
+            if m:
+                location = m.group(1)
 
         return {
             "source": "bazos.sk",
@@ -144,35 +155,48 @@ def scrape_bazos_detail(url):
 
 # ── Autobazar ──────────────────────────────────────────────────────────────────
 def scrape_autobazar(pages=4):
-    """
-    Autobazar index is JS-rendered. We get listing URLs from the XML sitemap
-    which is statically generated and publicly available.
-    """
     base = "https://www.autobazar.eu"
     urls = []
 
-    # Their sitemap index lists sitemaps per category
-    for i in range(1, pages + 1):
-        sitemap_url = f"{base}/sitemap/offers-{i}.xml"
+    # Try multiple sitemap URL patterns
+    sitemap_candidates = [
+        f"{base}/sitemap.xml",
+        f"{base}/sitemap-index.xml",
+        f"{base}/sitemap_index.xml",
+    ]
+
+    sitemap_urls = []
+    for candidate in sitemap_candidates:
         try:
-            r = requests.get(sitemap_url, headers=HEADERS, timeout=15)
-            print(f"  Autobazar sitemap {i}: status {r.status_code}, len {len(r.text)}")
-            if r.status_code != 200:
-                continue
+            r = requests.get(candidate, headers=HEADERS, timeout=10)
+            print(f"  Trying {candidate}: {r.status_code} {len(r.text)} bytes")
+            if r.status_code == 200 and len(r.text) > 500:
+                soup = BeautifulSoup(r.text, "xml")
+                # get sub-sitemap URLs containing "offer" or "inzerat"
+                for loc in soup.select("sitemap loc, loc"):
+                    u = loc.get_text(strip=True)
+                    if any(k in u for k in ["offer", "inzerat", "automobil", "detail"]):
+                        sitemap_urls.append(u)
+                if sitemap_urls:
+                    print(f"  Found {len(sitemap_urls)} sub-sitemaps")
+                    break
+        except Exception as e:
+            print(f"  Sitemap candidate error: {e}")
+
+    # Fetch detail URLs from sub-sitemaps
+    for smap in sitemap_urls[:pages]:
+        try:
+            r = requests.get(smap, headers=HEADERS, timeout=15)
             soup = BeautifulSoup(r.text, "xml")
             locs = soup.select("url loc")
             for loc in locs:
                 u = loc.get_text(strip=True)
                 if "/detail" in u and u not in urls:
                     urls.append(u)
-            print(f"  Sitemap {i}: {len(locs)} locs, {len(urls)} detail URLs so far")
+            print(f"  Sub-sitemap {smap[-30:]}: {len(locs)} locs")
             time.sleep(1)
         except Exception as e:
-            print(f"  Autobazar sitemap {i} error: {e}")
-
-    if not urls:
-        print("  Autobazar: no URLs from sitemap, skipping")
-        return []
+            print(f"  Sub-sitemap error: {e}")
 
     print(f"  Autobazar: {len(urls)} listing URLs found")
     listings = []
