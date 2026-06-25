@@ -53,33 +53,55 @@ def scrape_bazos_listing(url: str) -> dict | None:
         r = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
 
-        title = soup.select_one("h1.nadpis")
-        title = title.get_text(strip=True) if title else ""
+        # title — try multiple selectors
+        title = ""
+        for sel in ["h1.nadpis", "h1", ".inzeratynadpis"]:
+            el = soup.select_one(sel)
+            if el:
+                title = el.get_text(strip=True)
+                break
 
-        price_el = soup.select_one(".cena b")
-        price = price_el.get_text(strip=True) if price_el else ""
+        # price
+        price = ""
+        for sel in [".cena b", ".cena", "b"]:
+            el = soup.select_one(sel)
+            if el:
+                t = el.get_text(strip=True)
+                if any(c.isdigit() for c in t):
+                    price = t
+                    break
 
-        # description + specs live in div.popisdetail
+        # description + specs in div.popisdetail
         detail = soup.select_one("div.popisdetail")
         detail_text = detail.get_text(" ", strip=True) if detail else ""
 
         # mileage from detail text
         mileage = parse_km(detail_text)
 
-        # photo count
-        photos = soup.select("div.carousel img, .fotos img, #bigphoto img")
-        # bazos often puts thumbs in a table
+        # photo count — bazos puts thumbnails in table rows
+        photos = soup.select("img[src*='/foto/']")
         if not photos:
-            photos = soup.select("img[src*='foto']")
+            photos = soup.select(".carousel img, .fotos img")
         image_count = len(photos)
 
-        # seller name — appears in the contact table
-        seller_el = soup.select_one("table.listainzeratov td b, .inzeratykontakt b")
-        seller = seller_el.get_text(strip=True) if seller_el else ""
+        # seller name
+        seller = ""
+        for sel in [".inzeratykontakt b", ".listainzeratov b", ".kontakt b"]:
+            el = soup.select_one(sel)
+            if el:
+                seller = el.get_text(strip=True)
+                break
 
         # location
-        loc_el = soup.select_one("span.locate, .inzeratylok")
-        location = loc_el.get_text(strip=True) if loc_el else ""
+        location = ""
+        for sel in [".inzeratylok", "span.locate", ".lokace"]:
+            el = soup.select_one(sel)
+            if el:
+                location = el.get_text(strip=True)
+                break
+
+        if not title:
+            print(f"  Warning: no title found for {url}")
 
         return {
             "source": "bazos.sk",
@@ -91,7 +113,7 @@ def scrape_bazos_listing(url: str) -> dict | None:
             "image_count": image_count,
             "seller": seller,
             "location": location,
-            "seller_type": "private",  # bazos is private-only
+            "seller_type": "private",
         }
     except Exception as e:
         print(f"  Bazos detail error {url}: {e}")
@@ -201,61 +223,60 @@ def scrape_autobazar_listing(url: str) -> dict | None:
 
 # ── Autobazar scraper ──────────────────────────────────────────────────────────
 def scrape_autobazar(pages=4) -> list[dict]:
-    """Use Autobazar's internal search API which returns JSON."""
+    """
+    Autobazar is JS-rendered so we can't scrape the index directly.
+    Use their RSS feed instead which is plain XML.
+    """
     base = "https://www.autobazar.eu"
     urls = []
 
-    for page in range(1, pages + 1):
-        # Autobazar uses a Next.js API route for search results
-        api_url = (
-            f"{base}/_next/data/latest/osobne-automobily.json"
-            f"?page={page}&typ=osobne-vozidla"
-        )
+    # Try RSS feeds for personal cars
+    rss_urls = [
+        f"{base}/rss/osobne-automobily/",
+        f"{base}/rss/osobne-automobily/?page=2",
+        f"{base}/rss/osobne-automobily/?page=3",
+        f"{base}/rss/osobne-automobily/?page=4",
+    ]
+
+    for rss_url in rss_urls[:pages]:
         try:
-            r = requests.get(api_url, headers=HEADERS, timeout=15)
-            if r.status_code != 200:
-                print(f"  Autobazar API page {page}: status {r.status_code}")
-                # fallback: try scraping the sitemap for detail URLs
-                break
-            data = r.json()
-            # navigate the Next.js page props to find listings
-            offers = (
-                data.get("pageProps", {})
-                    .get("dehydratedState", {})
-                    .get("queries", [{}])[0]
-                    .get("state", {})
-                    .get("data", {})
-                    .get("data", [])
-            )
-            for offer in offers:
-                slug = offer.get("slug") or offer.get("url") or ""
-                offer_id = offer.get("id") or offer.get("offerId") or ""
-                if slug:
-                    url = f"{base}/detail/{slug}/{offer_id}/" if offer_id else f"{base}{slug}"
-                    if url not in urls:
+            r = requests.get(rss_url, headers=HEADERS, timeout=15)
+            print(f"  Autobazar RSS status: {r.status_code}, length: {len(r.text)}")
+            soup = BeautifulSoup(r.text, "xml")
+            items = soup.select("item")
+            for item in items:
+                link = item.select_one("link")
+                if link:
+                    url = link.get_text(strip=True)
+                    if url and url not in urls:
                         urls.append(url)
-            print(f"  Autobazar API page {page}: {len(offers)} offers")
+            print(f"  RSS feed: {len(items)} items")
             time.sleep(1.5)
         except Exception as e:
-            print(f"  Autobazar API page {page} error: {e}")
+            print(f"  Autobazar RSS error: {e}")
 
-    # If API approach failed, try sitemap
+    # Fallback: try search page with different headers mimicking a real browser
     if not urls:
-        print("  Autobazar API failed, trying sitemap...")
+        print("  RSS failed, trying search API...")
         try:
-            r = requests.get(
-                f"{base}/sitemap-osobne-automobily-1.xml",
-                headers=HEADERS, timeout=15
-            )
-            soup = BeautifulSoup(r.text, "xml")
-            locs = soup.select("url loc")
-            for loc in locs[:80]:
-                url = loc.get_text(strip=True)
-                if "/detail/" in url or "/detail-nove-auto/" in url:
-                    urls.append(url)
-            print(f"  Sitemap: {len(urls)} URLs found")
+            search_url = f"{base}/api/offers/search?category=osobne-vozidla&limit=50&offset=0"
+            r = requests.get(search_url, headers={
+                **HEADERS,
+                "Accept": "application/json",
+                "Referer": f"{base}/osobne-automobily/",
+            }, timeout=15)
+            print(f"  Search API status: {r.status_code}")
+            if r.status_code == 200:
+                data = r.json()
+                offers = data.get("offers", data.get("data", data.get("results", [])))
+                for offer in offers:
+                    url = offer.get("url") or offer.get("link") or ""
+                    if url:
+                        full = base + url if url.startswith("/") else url
+                        urls.append(full)
+                print(f"  Search API: {len(urls)} URLs")
         except Exception as e:
-            print(f"  Sitemap error: {e}")
+            print(f"  Search API error: {e}")
 
     print(f"  Autobazar: {len(urls)} listing URLs found")
     listings = []
@@ -364,25 +385,31 @@ Reply ONLY in this exact JSON, no other text:
 {{"score": <1-10>, "reason": "<one sentence>", "red_flags": "<dealbreakers or none>"}}"""
 
     try:
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 200,
-                "temperature": 0.2,
-            },
-            timeout=15,
-        )
-        print(f"  Groq status: {r.status_code}")
-        resp_json = r.json()
-        if "choices" not in resp_json:
-            print(f"  Groq response: {resp_json}")
-            raise KeyError("choices")
+        for attempt in range(3):
+            r = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 200,
+                    "temperature": 0.2,
+                },
+                timeout=15,
+            )
+            resp_json = r.json()
+            if r.status_code == 429:
+                wait = 10 + attempt * 10
+                print(f"  Rate limited, waiting {wait}s...")
+                time.sleep(wait)
+                continue
+            if "choices" not in resp_json:
+                print(f"  Groq error: {resp_json}")
+                raise KeyError("choices")
+            break
         raw = resp_json["choices"][0]["message"]["content"].strip()
         raw = re.sub(r"```json|```", "", raw).strip()
         result = json.loads(raw)
@@ -457,12 +484,12 @@ def main():
         filtered.append(l)
     print(f"After mileage + dealer filter: {len(filtered)}")
 
-    # 4. AI score
+    # 4. AI score — cap at 30 to avoid Groq rate limits
     print("\nScoring with AI...")
-    for l in filtered:
+    for l in filtered[:30]:
         score_listing(l)
         print(f"  {l['score']}/10 — {l['title'][:50]}")
-        time.sleep(0.4)
+        time.sleep(3)
 
     # 5. Keep only good scores, sort
     scored = sorted(
