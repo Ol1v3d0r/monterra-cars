@@ -1,8 +1,4 @@
-import os
-import json
-import time
-import re
-import requests
+import os, json, time, re, requests
 from datetime import datetime
 from bs4 import BeautifulSoup
 
@@ -11,17 +7,20 @@ TELEGRAM_TOKEN   = os.environ.get("MONTERRA_TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("MONTERRA_CHAT_ID")
 GROQ_API_KEY     = os.environ.get("GROQ_API_KEY")
 
-SEEN_FILE    = "data/seen_listings.json"
-MAX_MILEAGE  = 135000
-TOP_N        = 5
-MIN_SCORE    = 6
+SEEN_FILE   = "data/seen_listings.json"
+MAX_MILEAGE = 135000
+TOP_N       = 5
+MIN_SCORE   = 6
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "sk-SK,sk;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
 }
+
+DESIRABLE = ["bmw", "audi", "mercedes", "škoda", "skoda", "porsche", "volkswagen", "volvo", "lexus"]
 
 # ── Seen listings ──────────────────────────────────────────────────────────────
 def load_seen():
@@ -30,85 +29,107 @@ def load_seen():
             return set(json.load(f))
     return set()
 
-def save_seen(seen: set):
+def save_seen(seen):
     os.makedirs("data", exist_ok=True)
     with open(SEEN_FILE, "w") as f:
         json.dump(list(seen), f)
 
-# ── Mileage helper ─────────────────────────────────────────────────────────────
-def parse_km(text: str):
-    """Extract first plausible km figure from a string."""
-    text = text.replace("\xa0", " ").replace(",", "").replace(" ", "")
+# ── Mileage ────────────────────────────────────────────────────────────────────
+def parse_km(text):
+    text = re.sub(r"[\s\xa0]", "", text)
     m = re.search(r"(\d{4,6})km", text, re.IGNORECASE)
     if m:
-        val = int(m.group(1))
-        if 1000 < val < 500000:
-            return val
+        v = int(m.group(1))
+        if 500 < v < 600000:
+            return v
     return None
 
-# ── Bazos scraper ──────────────────────────────────────────────────────────────
-def scrape_bazos_listing(url: str) -> dict | None:
-    """Fetch and parse a single Bazos detail page."""
+# ── Bazos ──────────────────────────────────────────────────────────────────────
+def scrape_bazos(pages=4):
+    base = "https://auto.bazos.sk"
+    seen_urls = set()
+    urls = []
+
+    for page in range(pages):
+        url = f"{base}/" if page == 0 else f"{base}/?od={page * 20}"
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.select(".inzeratynadpis a"):
+                href = a.get("href", "")
+                if href.startswith("/inzerat/"):
+                    full = base + href
+                    if full not in seen_urls:
+                        seen_urls.add(full)
+                        urls.append(full)
+            time.sleep(1)
+        except Exception as e:
+            print(f"  Bazos index error p{page}: {e}")
+
+    print(f"  Bazos: {len(urls)} unique URLs")
+
+    listings = []
+    for url in urls:
+        l = scrape_bazos_detail(url)
+        if l:
+            listings.append(l)
+        time.sleep(1)
+    return listings
+
+def scrape_bazos_detail(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # title — try multiple selectors
+        # Title
         title = ""
-        for sel in ["h1.nadpis", "h1", ".inzeratynadpis"]:
+        for sel in ["h1.nadpis", "h1"]:
             el = soup.select_one(sel)
             if el:
                 title = el.get_text(strip=True)
                 break
 
-        # price
+        # Price — look for element containing € or EUR
         price = ""
-        for sel in [".cena b", ".cena", "b"]:
+        for el in soup.find_all(["b", "strong", "span", "div"]):
+            t = el.get_text(strip=True)
+            if ("€" in t or "EUR" in t) and any(c.isdigit() for c in t) and len(t) < 30:
+                price = t
+                break
+
+        # popisdetail has specs + description
+        detail_el = soup.select_one("div.popisdetail")
+        detail_text = detail_el.get_text(" ", strip=True) if detail_el else ""
+        mileage = parse_km(detail_text)
+
+        # Photos
+        photos = soup.select("img[src*='/foto/']")
+        image_count = len(photos)
+
+        # Seller name — in the contact section
+        seller = ""
+        for sel in [".inzeratykontakt b", ".listainzeratov b", ".kontakt b", "table b"]:
             el = soup.select_one(sel)
             if el:
                 t = el.get_text(strip=True)
-                if any(c.isdigit() for c in t):
-                    price = t
+                if t and len(t) < 50:
+                    seller = t
                     break
 
-        # description + specs in div.popisdetail
-        detail = soup.select_one("div.popisdetail")
-        detail_text = detail.get_text(" ", strip=True) if detail else ""
-
-        # mileage from detail text
-        mileage = parse_km(detail_text)
-
-        # photo count — bazos puts thumbnails in table rows
-        photos = soup.select("img[src*='/foto/']")
-        if not photos:
-            photos = soup.select(".carousel img, .fotos img")
-        image_count = len(photos)
-
-        # seller name
-        seller = ""
-        for sel in [".inzeratykontakt b", ".listainzeratov b", ".kontakt b"]:
-            el = soup.select_one(sel)
-            if el:
-                seller = el.get_text(strip=True)
-                break
-
-        # location
+        # Location
         location = ""
-        for sel in [".inzeratylok", "span.locate", ".lokace"]:
+        for sel in [".inzeratylok", ".lokace", "span.locate"]:
             el = soup.select_one(sel)
             if el:
                 location = el.get_text(strip=True)
                 break
-
-        if not title:
-            print(f"  Warning: no title found for {url}")
 
         return {
             "source": "bazos.sk",
             "url": url,
             "title": title,
             "price": price,
-            "description": detail_text,
+            "description": detail_text[:600],
             "mileage": mileage,
             "image_count": image_count,
             "seller": seller,
@@ -116,94 +137,106 @@ def scrape_bazos_listing(url: str) -> dict | None:
             "seller_type": "private",
         }
     except Exception as e:
-        print(f"  Bazos detail error {url}: {e}")
+        print(f"  Bazos detail error: {e}")
         return None
 
-def scrape_bazos(pages=4) -> list[dict]:
-    """Scrape listing URLs from Bazos auto index, then fetch each detail page."""
-    base = "https://auto.bazos.sk"
+# ── Autobazar ──────────────────────────────────────────────────────────────────
+def scrape_autobazar(pages=4):
+    """
+    Autobazar index is JS-rendered. We get listing URLs from the XML sitemap
+    which is statically generated and publicly available.
+    """
+    base = "https://www.autobazar.eu"
     urls = []
 
-    for page in range(pages):
-        index_url = f"{base}/" if page == 0 else f"{base}/?od={page * 20}"
+    # Their sitemap index lists sitemaps per category
+    for i in range(1, pages + 1):
+        sitemap_url = f"{base}/sitemap/offers-{i}.xml"
         try:
-            r = requests.get(index_url, headers=HEADERS, timeout=15)
-            soup = BeautifulSoup(r.text, "html.parser")
-            links = soup.select(".inzeratynadpis a")
-            for a in links:
-                href = a.get("href", "")
-                if href.startswith("/inzerat/"):
-                    urls.append(base + href)
-            time.sleep(1.5)
+            r = requests.get(sitemap_url, headers=HEADERS, timeout=15)
+            print(f"  Autobazar sitemap {i}: status {r.status_code}, len {len(r.text)}")
+            if r.status_code != 200:
+                continue
+            soup = BeautifulSoup(r.text, "xml")
+            locs = soup.select("url loc")
+            for loc in locs:
+                u = loc.get_text(strip=True)
+                if "/detail" in u and u not in urls:
+                    urls.append(u)
+            print(f"  Sitemap {i}: {len(locs)} locs, {len(urls)} detail URLs so far")
+            time.sleep(1)
         except Exception as e:
-            print(f"  Bazos index page {page} error: {e}")
+            print(f"  Autobazar sitemap {i} error: {e}")
 
-    print(f"  Bazos: {len(urls)} listing URLs found")
+    if not urls:
+        print("  Autobazar: no URLs from sitemap, skipping")
+        return []
+
+    print(f"  Autobazar: {len(urls)} listing URLs found")
     listings = []
-    for url in urls:
-        result = scrape_bazos_listing(url)
-        if result:
-            listings.append(result)
-        time.sleep(1.2)
+    for url in urls[:60]:
+        l = scrape_autobazar_detail(url)
+        if l:
+            listings.append(l)
+        time.sleep(1)
     return listings
 
-# ── Autobazar scraper ──────────────────────────────────────────────────────────
-def scrape_autobazar_listing(url: str) -> dict | None:
-    """Fetch and parse a single Autobazar detail page."""
+def scrape_autobazar_detail(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # title from og tag (reliable)
+        # Title from og:title — reliable even in SSR
         title = ""
-        og_title = soup.select_one('meta[property="og:title"]')
-        if og_title:
-            title = og_title.get("content", "")
+        og = soup.select_one('meta[property="og:title"]')
+        if og:
+            title = og.get("content", "").strip()
 
-        # price — div with text-xl font-semibold containing €
+        # Price
         price = ""
-        for el in soup.select("div.text-xl.font-semibold"):
+        for el in soup.select("div.text-xl, div.font-semibold, span.font-semibold"):
             t = el.get_text(strip=True)
-            if "€" in t:
+            if "€" in t and any(c.isdigit() for c in t):
                 price = t
                 break
 
-        # mileage — span with those exact tailwind classes containing km
+        # Mileage from span containing km
         mileage = None
-        for el in soup.select("span.font-bold"):
+        for el in soup.select("span, div"):
             t = el.get_text(strip=True)
-            if "km" in t.lower():
+            if re.search(r"\d{3,6}\s*km", t, re.IGNORECASE) and len(t) < 20:
                 mileage = parse_km(t)
                 if mileage:
                     break
 
-        # image count — count og:image tags or gallery imgs
-        photos = soup.select("img[src*='autobazar'], img[src*='s.autobazar']")
+        # Photos
+        photos = soup.select("img[src*='autobazar'], img[src*='img.autobazar']")
         image_count = len(photos)
 
-        # seller name
+        # Seller name
         seller = ""
-        for el in soup.select("div.font-bold"):
+        for el in soup.select("div.font-bold, span.font-bold"):
             t = el.get_text(strip=True)
-            if t and len(t) < 40 and not any(c in t for c in ["€", "km", "kW"]):
+            if t and 2 < len(t) < 40 and "€" not in t and "km" not in t.lower():
                 seller = t
                 break
 
-        # location — the google maps link
+        # Location
         location = ""
         loc_el = soup.select_one("a[href*='maps.google.com']")
         if loc_el:
             location = loc_el.get_text(strip=True)
 
-        # description
+        # Description
         desc = ""
-        desc_el = soup.select_one("div.description, section.description, [class*='description']")
-        if desc_el:
-            desc = desc_el.get_text(" ", strip=True)
+        for sel in ["div.description", "section.description", "[class*='popis']"]:
+            el = soup.select_one(sel)
+            if el:
+                desc = el.get_text(" ", strip=True)[:600]
+                break
 
-        # dealer detection — autobazar mixes private and dealers
         page_text = soup.get_text().lower()
-        seller_type = "dealer" if any(w in page_text for w in ["autorizovaný predajca", "autobazár", "s.r.o", "auto s.r.o"]) else "private"
+        seller_type = "dealer" if any(w in page_text for w in ["autorizovaný predajca", "s.r.o.", "predajca"]) else "private"
 
         return {
             "source": "autobazar.eu",
@@ -218,239 +251,133 @@ def scrape_autobazar_listing(url: str) -> dict | None:
             "seller_type": seller_type,
         }
     except Exception as e:
-        print(f"  Autobazar detail error {url}: {e}")
+        print(f"  Autobazar detail error: {e}")
         return None
 
-# ── Autobazar scraper ──────────────────────────────────────────────────────────
-def scrape_autobazar(pages=4) -> list[dict]:
-    """
-    Autobazar is JS-rendered so we can't scrape the index directly.
-    Use their RSS feed instead which is plain XML.
-    """
-    base = "https://www.autobazar.eu"
-    urls = []
+# ── AI Scoring ─────────────────────────────────────────────────────────────────
+def score_listing(listing):
+    prompt = f"""You are helping a car broker in Slovakia. Score this private car listing 1-10.
 
-    # Try RSS feeds for personal cars
-    rss_urls = [
-        f"{base}/rss/osobne-automobily/",
-        f"{base}/rss/osobne-automobily/?page=2",
-        f"{base}/rss/osobne-automobily/?page=3",
-        f"{base}/rss/osobne-automobily/?page=4",
-    ]
+HIGH score (7-10): desirable brand (BMW/Audi/Mercedes/Škoda/Porsche/VW/Volvo/Lexus), few photos (1-4), thin/vague description, private seller
+LOW score (1-4): many photos (7+), detailed description, dealer, undesirable brand
 
-    for rss_url in rss_urls[:pages]:
+Title: {listing.get('title')}
+Price: {listing.get('price')}
+Photos: {listing.get('image_count')}
+Mileage: {listing.get('mileage')} km
+Seller: {listing.get('seller_type')}
+Description: {listing.get('description', '')[:300]}
+
+Respond with ONLY valid JSON, nothing else:
+{{"score": 7, "reason": "one sentence", "red_flags": "none"}}"""
+
+    for attempt in range(3):
         try:
-            r = requests.get(rss_url, headers=HEADERS, timeout=15)
-            print(f"  Autobazar RSS status: {r.status_code}, length: {len(r.text)}")
-            soup = BeautifulSoup(r.text, "xml")
-            items = soup.select("item")
-            for item in items:
-                link = item.select_one("link")
-                if link:
-                    url = link.get_text(strip=True)
-                    if url and url not in urls:
-                        urls.append(url)
-            print(f"  RSS feed: {len(items)} items")
-            time.sleep(1.5)
+            r = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "max_tokens": 150, "temperature": 0.1},
+                timeout=20,
+            )
+            if r.status_code == 429:
+                print(f"  Rate limited, waiting 15s...")
+                time.sleep(15)
+                continue
+            data = r.json()
+            if "choices" not in data:
+                print(f"  Groq error: {data}")
+                break
+            raw = data["choices"][0]["message"]["content"].strip()
+            # strip any markdown
+            raw = re.sub(r"^```.*?\n|```$", "", raw, flags=re.MULTILINE).strip()
+            print(f"  Groq: {raw[:80]}")
+            parsed = json.loads(raw)
+            listing["score"] = int(parsed["score"])
+            listing["reason"] = parsed.get("reason", "")
+            listing["red_flags"] = parsed.get("red_flags", "none")
+            return listing
+        except json.JSONDecodeError as e:
+            print(f"  JSON parse error: {e} — raw was: {raw[:100]}")
         except Exception as e:
-            print(f"  Autobazar RSS error: {e}")
+            print(f"  Score attempt {attempt+1} error: {e}")
+        time.sleep(5)
 
-    # Fallback: try search page with different headers mimicking a real browser
-    if not urls:
-        print("  RSS failed, trying search API...")
-        try:
-            search_url = f"{base}/api/offers/search?category=osobne-vozidla&limit=50&offset=0"
-            r = requests.get(search_url, headers={
-                **HEADERS,
-                "Accept": "application/json",
-                "Referer": f"{base}/osobne-automobily/",
-            }, timeout=15)
-            print(f"  Search API status: {r.status_code}")
-            if r.status_code == 200:
-                data = r.json()
-                offers = data.get("offers", data.get("data", data.get("results", [])))
-                for offer in offers:
-                    url = offer.get("url") or offer.get("link") or ""
-                    if url:
-                        full = base + url if url.startswith("/") else url
-                        urls.append(full)
-                print(f"  Search API: {len(urls)} URLs")
-        except Exception as e:
-            print(f"  Search API error: {e}")
+    listing["score"] = 0
+    listing["reason"] = "scoring failed"
+    listing["red_flags"] = ""
+    return listing
 
-    print(f"  Autobazar: {len(urls)} listing URLs found")
-    listings = []
-    for url in urls[:60]:
-        result = scrape_autobazar_listing(url)
-        if result:
-            listings.append(result)
-        time.sleep(1.2)
-    return listings
+# ── Cross-check ────────────────────────────────────────────────────────────────
+def normalize(t):
+    return re.sub(r"\s+", " ", t.lower().strip())
 
-# ── Cross-platform check ───────────────────────────────────────────────────────
-def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.lower().strip())
-
-def cross_check(listing: dict) -> bool:
-    """
-    Search the OTHER platform for this car.
-    Match on: price + make/model + location + seller name.
-    3 out of 4 matching = cross-listed.
-    Returns True if cross-listed (should be skipped).
-    """
-    title_words = listing["title"].split()[:3]  # e.g. ["Audi", "A3", "2021"]
-    search_query = " ".join(title_words)
-    price_raw = re.sub(r"[^\d]", "", listing.get("price", ""))
+def cross_check(listing):
+    title_words = listing["title"].split()[:3]
+    query = " ".join(title_words)
+    price_digits = re.sub(r"[^\d]", "", listing.get("price", ""))
     location = normalize(listing.get("location", ""))
     seller = normalize(listing.get("seller", ""))
 
+    def count_matches(card_text):
+        score = 0
+        if price_digits and price_digits in re.sub(r"[^\d]", "", card_text):
+            score += 1
+        if any(w.lower() in card_text for w in title_words):
+            score += 1
+        if location and any(p.strip() in card_text for p in location.split(",")):
+            score += 1
+        if seller and seller in card_text:
+            score += 1
+        return score
+
     try:
         if listing["source"] == "bazos.sk":
-            url = f"https://www.autobazar.eu/vyhladavanie/?q={requests.utils.quote(search_query)}"
-            r = requests.get(url, headers=HEADERS, timeout=12)
+            r = requests.get(
+                f"https://www.autobazar.eu/vyhladavanie/?q={requests.utils.quote(query)}",
+                headers=HEADERS, timeout=12
+            )
             soup = BeautifulSoup(r.text, "html.parser")
-
             for card in soup.select("a[href*='/detail']"):
-                card_text = normalize(card.get_text(" ", strip=True))
-                matches = 0
-                if price_raw and price_raw in re.sub(r"[^\d]", "", card_text):
-                    matches += 1
-                if any(w.lower() in card_text for w in title_words):
-                    matches += 1
-                if location and any(loc_part in card_text for loc_part in location.split(",")):
-                    matches += 1
-                if seller and seller in card_text:
-                    matches += 1
-                if matches >= 3:
-                    print(f"  Cross-listed (bazos→autobazar, {matches}/4 matches): {listing['title']}")
+                if count_matches(normalize(card.get_text(" "))) >= 3:
+                    print(f"  Cross-listed on autobazar: {listing['title'][:40]}")
                     return True
 
         elif listing["source"] == "autobazar.eu":
-            url = f"https://auto.bazos.sk/?hledat={requests.utils.quote(search_query)}&rubriky=auto"
-            r = requests.get(url, headers=HEADERS, timeout=12)
+            r = requests.get(
+                f"https://auto.bazos.sk/?hledat={requests.utils.quote(query)}&rubriky=auto",
+                headers=HEADERS, timeout=12
+            )
             soup = BeautifulSoup(r.text, "html.parser")
-
             for card in soup.select(".inzeraty .inzeratynadpis, .inzeraty .popis"):
-                card_text = normalize(card.get_text(" ", strip=True))
-                matches = 0
-                if price_raw and price_raw in re.sub(r"[^\d]", "", card_text):
-                    matches += 1
-                if any(w.lower() in card_text for w in title_words):
-                    matches += 1
-                if location and any(loc_part in card_text for loc_part in location.split(",")):
-                    matches += 1
-                if seller and seller in card_text:
-                    matches += 1
-                if matches >= 3:
-                    print(f"  Cross-listed (autobazar→bazos, {matches}/4 matches): {listing['title']}")
+                if count_matches(normalize(card.get_text(" "))) >= 3:
+                    print(f"  Cross-listed on bazos: {listing['title'][:40]}")
                     return True
 
     except Exception as e:
-        print(f"  Cross-check error for {listing['title']}: {e}")
-        # Don't skip on error — let it through and you check manually
-        return False
+        print(f"  Cross-check error: {e}")
 
     return False
 
-# ── AI scoring (Groq) ──────────────────────────────────────────────────────────
-def score_listing(listing: dict) -> dict:
-    prompt = f"""You are helping a car broker in Slovakia find private car listings worth approaching.
-
-The broker's model: find private sellers with low-quality listings (bad photos, thin description), get permission to re-list professionally across all platforms, earn a small commission on sale.
-
-Score this listing 1-10. High score = worth approaching. Low score = skip.
-
-What makes a HIGH score:
-- Few photos (1-4) and/or visibly low quality
-- Vague or thin description
-- Private seller confirmed
-- Desirable brand: BMW, Audi, Mercedes, Škoda, Porsche, Volkswagen, Volvo, Lexus
-
-What makes a LOW score:
-- Many photos (7+) especially professional ones
-- Detailed description
-- Dealer listing
-- Undesirable or very common car
-
-Listing:
-Title: {listing.get('title')}
-Price: {listing.get('price')}
-Source: {listing.get('source')}
-Photos: {listing.get('image_count')}
-Mileage: {listing.get('mileage')} km
-Seller type: {listing.get('seller_type')}
-Description: {listing.get('description', '')[:400]}
-
-Reply ONLY in this exact JSON, no other text:
-{{"score": <1-10>, "reason": "<one sentence>", "red_flags": "<dealbreakers or none>"}}"""
-
-    try:
-        for attempt in range(3):
-            r = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 200,
-                    "temperature": 0.2,
-                },
-                timeout=15,
-            )
-            resp_json = r.json()
-            if r.status_code == 429:
-                wait = 10 + attempt * 10
-                print(f"  Rate limited, waiting {wait}s...")
-                time.sleep(wait)
-                continue
-            if "choices" not in resp_json:
-                print(f"  Groq error: {resp_json}")
-                raise KeyError("choices")
-            break
-        raw = resp_json["choices"][0]["message"]["content"].strip()
-        raw = re.sub(r"```json|```", "", raw).strip()
-        result = json.loads(raw)
-        listing["score"] = result.get("score", 0)
-        listing["reason"] = result.get("reason", "")
-        listing["red_flags"] = result.get("red_flags", "")
-    except Exception as e:
-        print(f"  Score error: {e}")
-        listing["score"] = 0
-        listing["reason"] = "Scoring failed"
-        listing["red_flags"] = ""
-    return listing
-
 # ── Telegram ───────────────────────────────────────────────────────────────────
-def send_telegram(message: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    r = requests.post(url, json={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }, timeout=10)
-    if not r.ok:
-        print(f"  Telegram error: {r.text}")
+def send_telegram(msg):
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True},
+        timeout=10,
+    )
 
-def format_listing(listing: dict, rank: int) -> str:
-    mileage = listing.get("mileage")
-    mileage_str = f"{mileage:,} km".replace(",", " ") if mileage else "not found"
-    score = listing.get("score", 0)
-    stars = "⭐" * min(round(score / 2), 5)
-
+def format_listing(l, rank):
+    km = l.get("mileage")
+    km_str = f"{km:,} km".replace(",", " ") if km else "km unknown"
+    stars = "⭐" * min(round(l.get("score", 0) / 2), 5)
     return (
-        f"<b>#{rank} — {listing.get('title', '')}</b>\n"
-        f"{stars} <b>{score}/10</b>\n"
-        f"💰 {listing.get('price', 'N/A')}\n"
-        f"📏 {mileage_str}\n"
-        f"🖼 {listing.get('image_count', '?')} photos\n"
-        f"📍 {listing.get('location', 'N/A')}\n"
-        f"👤 {listing.get('seller', 'N/A')}\n"
-        f"💬 {listing.get('reason', '')}\n"
-        f"🔗 {listing.get('url', '')}"
+        f"<b>#{rank} — {l.get('title', '')}</b>\n"
+        f"{stars} {l.get('score', 0)}/10\n"
+        f"💰 {l.get('price', 'N/A')}  📏 {km_str}\n"
+        f"🖼 {l.get('image_count', '?')} photos  👤 {l.get('seller', 'N/A')}\n"
+        f"📍 {l.get('location', 'N/A')}\n"
+        f"💬 {l.get('reason', '')}\n"
+        f"🔗 {l.get('url', '')}"
     )
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -458,83 +385,86 @@ def main():
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Monterra Cars starting...")
     seen = load_seen()
 
-    # 1. Scrape both platforms
     print("\nScraping Bazos.sk...")
     bazos = scrape_bazos(pages=4)
-    print(f"  → {len(bazos)} listings fetched")
+    print(f"  → {len(bazos)} fetched")
 
     print("\nScraping Autobazar.eu...")
     autobazar = scrape_autobazar(pages=4)
-    print(f"  → {len(autobazar)} listings fetched")
+    print(f"  → {len(autobazar)} fetched")
 
-    all_listings = bazos + autobazar
+    # Deduplicate
+    all_seen_urls = set()
+    all_listings = []
+    for l in bazos + autobazar:
+        if l["url"] not in all_seen_urls:
+            all_seen_urls.add(l["url"])
+            all_listings.append(l)
+    print(f"Unique listings: {len(all_listings)}")
 
-    # 2. Remove already seen
+    # Remove already sent
     new = [l for l in all_listings if l["url"] not in seen]
-    print(f"\nNew listings (not seen before): {len(new)}")
+    print(f"New (not seen before): {len(new)}")
 
-    # 3. Hard filters: mileage + dealer
-    filtered = []
-    for l in new:
-        if l.get("seller_type") == "dealer":
-            continue
-        m = l.get("mileage")
-        if m and m > MAX_MILEAGE:
-            continue
-        filtered.append(l)
-    print(f"After mileage + dealer filter: {len(filtered)}")
+    # Hard filter: mileage + dealer
+    filtered = [
+        l for l in new
+        if l.get("seller_type") != "dealer"
+        and (l.get("mileage") is None or l["mileage"] <= MAX_MILEAGE)
+    ]
+    print(f"After hard filters: {len(filtered)}")
 
-    # 4. AI score — cap at 30 to avoid Groq rate limits
-    print("\nScoring with AI...")
-    for l in filtered[:30]:
+    # Pre-filter by desirable brand before scoring (saves Groq calls)
+    desirable = [l for l in filtered if any(b in l.get("title", "").lower() for b in DESIRABLE)]
+    other = [l for l in filtered if l not in desirable]
+    print(f"Desirable brand: {len(desirable)}, other: {len(other)}")
+
+    # Score desirable first, then others if needed
+    to_score = (desirable + other)[:30]
+    print(f"\nScoring {len(to_score)} listings with AI...")
+    for l in to_score:
         score_listing(l)
-        print(f"  {l['score']}/10 — {l['title'][:50]}")
+        print(f"  {l.get('score', 0)}/10 — {l.get('title', '')[:50]}")
         time.sleep(3)
 
-    # 5. Keep only good scores, sort
+    # Filter by min score
     scored = sorted(
-        [l for l in filtered if l.get("score", 0) >= MIN_SCORE],
-        key=lambda x: x["score"],
-        reverse=True
+        [l for l in to_score if l.get("score", 0) >= MIN_SCORE],
+        key=lambda x: x["score"], reverse=True
     )
     print(f"\nAbove min score ({MIN_SCORE}): {len(scored)}")
 
-    # 6. Cross-platform check — only on scored candidates
-    print("\nCross-checking top candidates...")
+    # Cross-check
+    print("\nCross-checking...")
     final = []
     for l in scored:
         if cross_check(l):
-            print(f"  SKIP (cross-listed): {l['title']}")
+            print(f"  SKIP (cross-listed): {l['title'][:40]}")
         else:
             final.append(l)
-            print(f"  OK (not cross-listed): {l['title']}")
+            print(f"  OK: {l['title'][:40]}")
         time.sleep(1.5)
         if len(final) >= TOP_N:
-            break  # stop once we have enough
+            break
 
-    # 7. Mark all new listings as seen
+    # Save seen
     for l in new:
         seen.add(l["url"])
     save_seen(seen)
 
-    # 8. Send to Telegram
+    # Send
     if not final:
-        send_telegram(
-            "🚗 <b>Monterra — " + datetime.now().strftime("%d %b %Y") + "</b>\n\n"
-            "No strong candidates found today."
-        )
-        print("\nNo candidates. Sent empty report.")
+        send_telegram(f"🚗 <b>Monterra — {datetime.now().strftime('%d %b %Y')}</b>\n\nNo strong candidates today.")
+        print("No candidates.")
         return
 
     send_telegram(
         f"🚗 <b>Monterra Cars — {datetime.now().strftime('%d %b %Y')}</b>\n"
-        f"<b>{len(final)}</b> candidates from {len(new)} new listings\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
+        f"<b>{len(final)}</b> candidates from {len(new)} new listings\n━━━━━━━━━━━━━━━━━━━━"
     )
     time.sleep(0.5)
-
-    for i, listing in enumerate(final, 1):
-        send_telegram(format_listing(listing, i))
+    for i, l in enumerate(final, 1):
+        send_telegram(format_listing(l, i))
         time.sleep(0.5)
 
     print(f"\nDone. Sent {len(final)} listings.")
