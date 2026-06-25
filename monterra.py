@@ -102,19 +102,21 @@ def scrape_bazos_detail(url):
         detail_text = detail_el.get_text(" ", strip=True) if detail_el else ""
         mileage = parse_km(detail_text)
 
-        # Photos
-        photos = soup.select("img[src*='/foto/']")
+        # Photos — carousel-cell-image is the correct class
+        photos = soup.select("img.carousel-cell-image")
         image_count = len(photos)
 
-        # Seller name — in the contact section
+        # Seller — in the hodnotenie link
         seller = ""
-        for sel in [".inzeratykontakt b", ".listainzeratov b", ".kontakt b", "table b"]:
-            el = soup.select_one(sel)
-            if el:
-                t = el.get_text(strip=True)
-                if t and len(t) < 50:
-                    seller = t
-                    break
+        seller_link = soup.select_one("a[href*='hodnotenie.php']")
+        if seller_link:
+            seller = seller_link.get_text(strip=True)
+
+        # Dealer detection — s.r.o., known dealer suffixes, or "auto" businesses
+        dealer_signals = ["s.r.o.", "s.r.o", "a.s.", " auto ", "bazár", "bazar", "motors", "cars", "group"]
+        seller_lower = seller.lower()
+        is_dealer = any(d in seller_lower for d in dealer_signals)
+        seller_type = "dealer" if is_dealer else "private"
 
         # Location
         location = ""
@@ -134,7 +136,7 @@ def scrape_bazos_detail(url):
             "image_count": image_count,
             "seller": seller,
             "location": location,
-            "seller_type": "private",
+            "seller_type": seller_type,
         }
     except Exception as e:
         print(f"  Bazos detail error: {e}")
@@ -407,11 +409,15 @@ def main():
     print(f"New (not seen before): {len(new)}")
 
     # Hard filter: mileage + dealer
-    filtered = [
-        l for l in new
-        if l.get("seller_type") != "dealer"
-        and (l.get("mileage") is None or l["mileage"] <= MAX_MILEAGE)
-    ]
+    filtered = []
+    for l in new:
+        if l.get("seller_type") == "dealer":
+            print(f"  SKIP dealer: {l.get('seller', '?')} — {l.get('title', '')[:40]}")
+            continue
+        if l.get("mileage") and l["mileage"] > MAX_MILEAGE:
+            print(f"  SKIP mileage {l['mileage']}km: {l.get('title', '')[:40]}")
+            continue
+        filtered.append(l)
     print(f"After hard filters: {len(filtered)}")
 
     # Pre-filter by desirable brand before scoring (saves Groq calls)
