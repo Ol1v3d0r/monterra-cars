@@ -9,6 +9,7 @@ GROQ_API_KEY     = os.environ.get("GROQ_API_KEY")
 
 SEEN_FILE   = "data/seen_listings.json"
 MAX_MILEAGE = 135000
+MAX_PHOTOS  = 8
 TOP_N       = 5
 MIN_SCORE   = 6
 
@@ -282,20 +283,26 @@ def scrape_autobazar_detail(url):
 
 # ── AI Scoring ─────────────────────────────────────────────────────────────────
 def score_listing(listing):
-    prompt = f"""You are helping a car broker in Slovakia. Score this private car listing 1-10.
+    photos = listing.get("image_count", 0)
+    desc_len = len(listing.get("description", ""))
+    title = listing.get("title", "")
+    desirable = any(b in title.lower() for b in DESIRABLE)
 
-HIGH score (7-10): desirable brand (BMW/Audi/Mercedes/Škoda/Porsche/VW/Volvo/Lexus), few photos (1-4), thin/vague description, private seller
-LOW score (1-4): many photos (7+), detailed description, dealer, undesirable brand
+    prompt = f"""Score this car listing 1-10 for a broker who wants private sellers with BAD listings.
 
-Title: {listing.get('title')}
-Price: {listing.get('price')}
-Photos: {listing.get('image_count')}
-Mileage: {listing.get('mileage')} km
-Seller: {listing.get('seller_type')}
-Description: {listing.get('description', '')[:300]}
+STRICT SCORING RULES — apply these exactly:
+- {photos} photos: {"10+ photos = MAXIMUM score is 4" if photos >= 10 else "7-9 photos = MAXIMUM score is 5" if photos >= 7 else "4-6 photos = MAXIMUM score is 7" if photos >= 4 else "1-3 photos = good, score can reach 10"}
+- Description {desc_len} chars: {"200+ chars = detailed, penalise -2" if desc_len >= 200 else "under 200 chars = thin, bonus +1"}
+- Brand: {"desirable brand detected = bonus +2" if desirable else "undesirable brand = MAXIMUM score is 4"}
 
-Respond with ONLY valid JSON, nothing else:
-{{"score": 7, "reason": "one sentence", "red_flags": "none"}}"""
+Title: {title}
+Price: {listing.get("price")}
+Photos: {photos}
+Mileage: {listing.get("mileage")} km
+Description: {listing.get("description", "")[:200]}
+
+Respond ONLY with valid JSON, no other text:
+{{"score": <1-10>, "reason": "<one sentence>", "red_flags": "<issues or none>"}}"""
 
     for attempt in range(3):
         try:
@@ -314,7 +321,6 @@ Respond with ONLY valid JSON, nothing else:
                 print(f"  Groq error: {data}")
                 break
             raw = data["choices"][0]["message"]["content"].strip()
-            # strip any markdown
             raw = re.sub(r"^```.*?\n|```$", "", raw, flags=re.MULTILINE).strip()
             print(f"  Groq: {raw[:80]}")
             parsed = json.loads(raw)
@@ -323,7 +329,7 @@ Respond with ONLY valid JSON, nothing else:
             listing["red_flags"] = parsed.get("red_flags", "none")
             return listing
         except json.JSONDecodeError as e:
-            print(f"  JSON parse error: {e} — raw was: {raw[:100]}")
+            print(f"  JSON parse error: {e} — raw: {raw[:100]}")
         except Exception as e:
             print(f"  Score attempt {attempt+1} error: {e}")
         time.sleep(5)
@@ -432,7 +438,7 @@ def main():
     new = [l for l in all_listings if l["url"] not in seen]
     print(f"New (not seen before): {len(new)}")
 
-    # Hard filter: mileage + dealer
+    # Hard filter: mileage + dealer + too many photos
     filtered = []
     for l in new:
         if l.get("seller_type") == "dealer":
@@ -440,6 +446,9 @@ def main():
             continue
         if l.get("mileage") and l["mileage"] > MAX_MILEAGE:
             print(f"  SKIP mileage {l['mileage']}km: {l.get('title', '')[:40]}")
+            continue
+        if l.get("image_count", 0) > MAX_PHOTOS:
+            print(f"  SKIP photos {l['image_count']}: {l.get('title', '')[:40]}")
             continue
         filtered.append(l)
     print(f"After hard filters: {len(filtered)}")
