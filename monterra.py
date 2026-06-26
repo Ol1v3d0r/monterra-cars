@@ -271,6 +271,38 @@ def scrape_autobazar(pages=4):
         except Exception as e:
             print(f"  Sitemap error: {e}")
 
+    # Fallback: if sitemap discovery fails, use real category result pages from the homepage.
+    if not sitemap_urls:
+        fallback_pages = [
+            f"{base}/vysledky/osobne-vozidla/bmw/",
+            f"{base}/vysledky/osobne-vozidla/audi/",
+            f"{base}/vysledky/osobne-vozidla/skoda/",
+            f"{base}/vysledky/osobne-vozidla/volkswagen/",
+            f"{base}/vysledky/osobne-vozidla/mercedes-benz/",
+            f"{base}/vysledky/osobne-vozidla/volvo/",
+        ]
+        for page_url in fallback_pages:
+            try:
+                r = request_with_retry(page_url, timeout=15)
+                soup = BeautifulSoup(r.text, "html.parser")
+                found = 0
+                for link in soup.select("a[href*='/detail']"):
+                    href = link.get("href", "")
+                    if href.startswith("http"):
+                        full_url = href
+                    elif href.startswith("/"):
+                        full_url = base + href
+                    else:
+                        continue
+                    if full_url not in urls:
+                        urls.append(full_url)
+                        found += 1
+                print(f"  Autobazar fallback '{page_url.split('/')[-2]}': {found} listing URLs")
+                if urls:
+                    break
+            except Exception as e:
+                print(f"  Autobazar fallback error for '{page_url}': {e}")
+
     # Fetch detail URLs from sub-sitemaps
     for smap in sitemap_urls[:pages]:
         try:
@@ -633,9 +665,6 @@ def main():
             continue
         if l.get("mileage") and l["mileage"] > MAX_MILEAGE:
             print(f"  SKIP mileage {l['mileage']}km: {l.get('title', '')[:40]}")
-            continue
-        if l.get("image_count", 0) > MAX_PHOTOS:
-            print(f"  SKIP photos {l['image_count']}: {l.get('title', '')[:40]}")
             continue
         filtered.append(l)
     print(f"After hard filters: {len(filtered)}")
