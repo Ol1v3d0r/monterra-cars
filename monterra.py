@@ -43,6 +43,8 @@ PROBABLE_DEALER_NAMES = [
     "autocars",
     "autobazar",
     "car center",
+        "dacar",
+        "autotatry",
     "car centre",
     "auto group",
     "autohaus",
@@ -278,6 +280,13 @@ def scrape_bazos_detail(url):
                 title = el.get_text(strip=True)
                 break
 
+
+            if not seller:
+                page_text = soup.get_text(" ", strip=True)
+                name_match = re.search(r"Meno:\s*([A-Za-z0-9&.,()\-\/ ]{3,80})", page_text, re.IGNORECASE)
+                if name_match:
+                    seller = name_match.group(1).strip()
+
         # Price
         price = ""
         for el in soup.find_all(["b", "strong", "span", "div"]):
@@ -365,6 +374,42 @@ def scrape_autobazar(pages=4):
                     break
         except Exception as e:
             print(f"  Sitemap error: {e}")
+
+    # Always also crawl the main branded result pages. Autobazar exposes pagination as ?page=N.
+    brand_pages = [
+        f"{base}/vysledky/osobne-vozidla/bmw/",
+        f"{base}/vysledky/osobne-vozidla/audi/",
+        f"{base}/vysledky/osobne-vozidla/skoda/",
+        f"{base}/vysledky/osobne-vozidla/volkswagen/",
+        f"{base}/vysledky/osobne-vozidla/mercedes-benz/",
+        f"{base}/vysledky/osobne-vozidla/volvo/",
+        f"{base}/vysledky/osobne-vozidla/hyundai/",
+        f"{base}/vysledky/osobne-vozidla/toyota/",
+    ]
+
+    for base_url in brand_pages:
+        for page_num in range(1, pages + 1):
+            page_url = base_url if page_num == 1 else f"{base_url}?page={page_num}"
+            try:
+                r = request_with_retry(page_url, timeout=15)
+                soup = BeautifulSoup(r.text, "html.parser")
+                found = 0
+                for link in soup.select("a[href*='/detail']"):
+                    href = link.get("href", "")
+                    if href.startswith("http"):
+                        full_url = href
+                    elif href.startswith("/"):
+                        full_url = base + href
+                    else:
+                        continue
+                    if full_url not in urls:
+                        urls.append(full_url)
+                        found += 1
+                if found:
+                    brand_name = base_url.rstrip("/").split("/")[-1]
+                    print(f"  Autobazar {brand_name} page {page_num}: {found} listing URLs")
+            except Exception as e:
+                print(f"  Autobazar brand page error for '{page_url}': {e}")
 
     # Fallback: if sitemap discovery fails, use real category result pages from the homepage.
     if not sitemap_urls:
@@ -740,22 +785,18 @@ def main():
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Monterra Cars starting...")
     seen = load_seen()
 
-    print("\nScraping Bazos.sk...")
-    bazos = scrape_bazos(pages=4)
-    print(f"  → {len(bazos)} fetched")
-
     print("\nScraping Autobazar.eu...")
     autobazar = scrape_autobazar(pages=4)
     print(f"  → {len(autobazar)} fetched")
 
-    # Deduplicate
+    # Deduplicate only within Autobazar results.
     all_seen_urls = set()
     all_listings = []
-    for l in bazos + autobazar:
+    for l in autobazar:
         if l["url"] not in all_seen_urls:
             all_seen_urls.add(l["url"])
             all_listings.append(l)
-    print(f"Unique listings: {len(all_listings)}")
+    print(f"Unique Autobazar listings: {len(all_listings)}")
 
     # Remove already sent + fingerprint dedup
     fingerprints = load_fingerprints()
@@ -765,7 +806,7 @@ def main():
             new.append(l)
             fp = compute_fingerprint(l["title"], l["price"], l["mileage"])
             fingerprints.add(fp)
-    print(f"New (not seen, not duplicate): {len(new)}")
+    print(f"New Autobazar listings (not seen, not duplicate): {len(new)}")
     save_fingerprints(fingerprints)
 
     # Hard filters
@@ -800,8 +841,8 @@ def main():
     )
     print(f"\nAbove min score ({MIN_SCORE}): {len(scored)}")
 
-    # Cross-check against opposite platform
-    print("\nCross-checking against opposite platform...")
+    # Cross-check against Bazos only after Autobazar listings pass the basic filters.
+    print("\nCross-checking Autobazar candidates against Bazos.sk...")
     verified = []
     for l in scored:
         if cross_check(l):
