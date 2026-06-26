@@ -35,6 +35,21 @@ DEALER_SIGNALS = [
     "cars s", "auto s", "dealer", "predajca", "komercni", "obchodne", "inc", "ltd", "gmbh",
 ]
 
+PROBABLE_DEALER_NAMES = [
+    "dacar",
+    "autotatry",
+    "autocentrum",
+    "autocentra",
+    "autocars",
+    "autobazar",
+    "car center",
+    "car centre",
+    "auto group",
+    "autohaus",
+    "autoshow",
+    "autoprofit",
+]
+
 LAZY_DESC_PATTERNS = [
     r"^(see|pozri|vid).{0,20}photo",
     r"^(only|len|iba).{0,20}photo",
@@ -199,6 +214,22 @@ def is_lazy_description(desc):
     normalized = normalize_text(desc)
     return any(re.search(pattern, normalized) for pattern in LAZY_DESC_PATTERNS)
 
+
+def is_probable_dealer(seller, page_text="", title=""):
+    """Detect dealer-style listings even when the seller field is incomplete."""
+    combined = normalize_text(" ".join([seller or "", page_text or "", title or ""]))
+    if not combined:
+        return False
+    if any(signal in combined for signal in DEALER_SIGNALS):
+        return True
+    if any(name in combined for name in PROBABLE_DEALER_NAMES):
+        return True
+    if re.search(r"\b[a-z0-9&'\- ]{2,}\s+(s\.r\.o\.|a\.s\.|ltd\.|gmbh|inc\.)\b", combined):
+        return True
+    if "autorizovany predajca" in combined:
+        return True
+    return False
+
 # ── Bazos ──────────────────────────────────────────────────────────────────────
 def scrape_bazos(pages=4):
     base = "https://auto.bazos.sk"
@@ -273,8 +304,14 @@ def scrape_bazos_detail(url):
             if m:
                 seller = requests.utils.unquote(m.group(1)).replace("+", " ").strip()
 
-        seller_lower = normalize_text(seller)
-        is_dealer = any(d in seller_lower for d in DEALER_SIGNALS)
+        if not seller:
+            page_text = soup.get_text(" ", strip=True)
+            seller_match = re.search(r"(?:predavajuci|predajca|seller)[:\s]+([A-Za-z0-9&.,()\-\/ ]{3,80})", page_text, re.IGNORECASE)
+            if seller_match:
+                seller = seller_match.group(1).strip()
+
+        page_text = soup.get_text(" ", strip=True)
+        is_dealer = is_probable_dealer(seller, page_text=page_text, title=title)
         seller_type = "dealer" if is_dealer else "private"
 
         # Location
@@ -440,7 +477,7 @@ def scrape_autobazar_detail(url):
                 break
 
         page_text = normalize_text(soup.get_text())
-        seller_type = "dealer" if any(w in page_text for w in ["autorizovany", "s.r.o."]) else "private"
+        seller_type = "dealer" if is_probable_dealer(seller, page_text=page_text, title=title) else "private"
 
         return {
             "source": "autobazar.eu",
