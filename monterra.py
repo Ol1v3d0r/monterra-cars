@@ -42,6 +42,64 @@ LAZY_DESC_PATTERNS = [
     r"^([a-z0-9]{17})$",
 ]
 
+FACTUAL_DESC_MARKERS = [
+    "vin",
+    "r.v.",
+    "rok vyroby",
+    "technicke udaje",
+    "servisna historia",
+    "uprava",
+    "vybava",
+    "cena s dph",
+    "cena bez dph",
+    "1. majitel",
+    "prvy majitel",
+    "garancia",
+    "nehavarovane",
+    "lakovane",
+    "original",
+    "originál",
+    "úplna servisna historia",
+    "uplna servisna historia",
+    "mozny odpočet dph",
+    "možny odpočet dph",
+]
+
+FLUFF_DESC_MARKERS = [
+    "top stav",
+    "na predaj",
+    "super cena",
+    "skvela ponuka",
+    "luxusny zazitok",
+    "perfektne",
+    "ako nove",
+]
+
+PROFESSIONAL_DESC_MARKERS = [
+    "cena s dph",
+    "cena bez dph",
+    "mozny odpočet dph",
+    "možny odpočet dph",
+    "mozny odpočet",
+    "zmluvne garantujem",
+    "garantujem stav",
+    "v pripade zaujmu",
+    "v prípade záujmu",
+    "všetky info bližšie",
+    "vsetky info blizsie",
+    "autorizovanom servise",
+    "úplná servisná história",
+    "uplna servisna historia",
+    "bez akejkolvek investicie",
+    "bez akychkolvek investicii",
+    "top stave",
+    "top stav",
+    "technicke udaje",
+    "vybava luxury line",
+    "nehavarované",
+    "neburané",
+]
+
 # ── Utilities ──────────────────────────────────────────────────────────────────
 def require_config():
     missing = []
@@ -460,7 +518,7 @@ def score_listing(listing):
     score += 1
     reasons.append("price declared")
 
-    # DESCRIPTION: honest & simple = GOOD, overselling = BAD
+    # DESCRIPTION: honest/simple is good, factual detail is even better.
     if is_lazy_description(description):
         listing["score"] = 0
         listing["reason"] = "empty description"
@@ -468,22 +526,27 @@ def score_listing(listing):
         return listing
 
     desc_len = len(description)
+    factual_hits = sum(1 for marker in FACTUAL_DESC_MARKERS if marker in description)
+    fluff_hits = sum(1 for marker in FLUFF_DESC_MARKERS if marker in description)
+    professional_hits = sum(1 for marker in PROFESSIONAL_DESC_MARKERS if marker in description)
+
+    if professional_hits >= 3 and desc_len > 180:
+        listing["score"] = 0
+        listing["reason"] = "too professional"
+        listing["red_flags"] = "too professional"
+        return listing
+
     if desc_len < 100:
-        # Small, honest description = good (not overly marketed)
         score += 3
         reasons.append("honest brief listing")
     elif desc_len < 250:
-        # Moderate description
         score += 2
         reasons.append("clear description")
-    elif desc_len < 400:
-        # Longer but not excessive
+    elif desc_len < 500:
         score += 1
         reasons.append("detailed listing")
     else:
-        # Too long/professional = potential over-marketing
-        score += 0
-        reasons.append("extensive marketing")
+        reasons.append("very detailed listing")
 
     # VALUE SIGNALS: proof of quality
     value_indicators = 0
@@ -496,6 +559,17 @@ def score_listing(listing):
     if any(w in description for w in ["full", "kompletny", "kompletnú", "all records", "všetky"]):
         value_indicators += 1
         reasons.append("full documentation")
+
+    if factual_hits >= 2:
+        score += 2
+        reasons.append("factual details")
+    elif factual_hits == 1:
+        score += 1
+        reasons.append("factual detail")
+
+    if fluff_hits >= 2:
+        score -= 1
+        reasons.append("salesy wording")
     
     score += min(value_indicators, 2)  # Cap at +2 for documentation
 
